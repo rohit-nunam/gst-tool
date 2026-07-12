@@ -181,6 +181,7 @@ def classify_folder(folder="."):
     tpst_files, portal_comparison_files, ewb_candidates = [], [], []
     bo_profile_files = []
     gstr9_files, gstr9c_files, table8a_files, bs_pl_files = [], [], [], []
+    hsn_sac_master_files = []
 
     for f in xlsx:
         sn = set(_sheetnames(f))
@@ -197,6 +198,14 @@ def classify_folder(folder="."):
         # Table 8A: government-standard export, always has this exact sheet set
         if {"B2B", "B2BA", "CDNR", "CDNRA"}.issubset(sn) and "Read me" in sn:
             table8a_files.append(f); continue
+        # HSN/SAC code-and-description master (e.g. the NIC e-Invoice system's own
+        # downloadable HSN_SAC.xlsx) -- content signature: exactly these two sheet
+        # names. NOTE: this master has CODE + DESCRIPTION columns only, no GST rate
+        # column -- used for code-existence/description validation (see
+        # hsn_fraud_checks.check_hsn_master_validity), NOT for rate comparison
+        # (that stays HSN_RATE_HISTORY's job, a separate curated table).
+        if {"HSN_MSTR", "SAC_MSTR"}.issubset(sn):
+            hsn_sac_master_files.append(f); continue
         if _looks_like_gstr3b_merged(f):
             gstr3b_files.append(f); continue
         # TPST: single sheet, first cell mentions 'Taxpayer Profile'
@@ -223,24 +232,48 @@ def classify_folder(folder="."):
                 break
         wb.close()
 
+    try:
+        import pdfplumber
+        _pdfplumber_available = True
+    except ImportError:
+        _pdfplumber_available = False
+        print("[WARNING] pdfplumber is not installed -- GSTR-9/GSTR-9C/BO-Profile/BS-PL PDFs "
+              "cannot be told apart by content and will ALL be misclassified. Run: "
+              "pip install pdfplumber --break-system-packages, then re-run. "
+              "(This was silently swallowed before -- now surfaced loudly per the "
+              "no-safety-net rule.)")
+
+    pdf_classify_warnings = []
     for f in pdfs:
-        try:
-            head = ""
-            import pdfplumber
-            with pdfplumber.open(f) as pdf:
-                head = (pdf.pages[0].extract_text() or "")[:400] if pdf.pages else ""
-        except Exception:
-            head = ""
+        head = ""
+        extraction_failed_reason = None
+        if _pdfplumber_available:
+            try:
+                with pdfplumber.open(f) as pdf:
+                    head = (pdf.pages[0].extract_text() or "")[:400] if pdf.pages else ""
+            except Exception as ex:
+                extraction_failed_reason = str(ex)
         hl = head.lower()
         if "gstr-9c" in hl or "reconciliation statement" in hl:
             gstr9c_files.append(f)
         elif "gstr-9" in hl or "annual return" in hl:
             gstr9_files.append(f)
+        elif not _pdfplumber_available:
+            # Cannot classify at all without pdfplumber -- do NOT guess; park it as
+            # unclassified and warn loudly, rather than silently dumping it into bs_pl_files
+            # (which is what the previous version did, and which is the confirmed root cause
+            # of GSTR-9/GSTR-9C/BO-Profile all being misreported as "not supplied").
+            pdf_classify_warnings.append(
+                f"{f}: could not be classified (pdfplumber unavailable) -- NOT assigned to "
+                f"any document type this run. Install pdfplumber and re-run to fix.")
+        elif extraction_failed_reason:
+            pdf_classify_warnings.append(
+                f"{f}: pdfplumber failed to read this PDF ({extraction_failed_reason}) -- "
+                f"NOT assigned to any document type this run.")
         elif not head.strip():
-            # No extractable text -- likely a scanned financial statement or the BO Profile
-            # (BO Profile is text-based and caught separately below by its own signature scan
-            # in the original single-PDF slot; a genuinely blank/scanned PDF here is presumed
-            # to be the Balance Sheet/P&L export unless proven otherwise).
+            # Genuinely no extractable text (confirmed pdfplumber ran successfully and found
+            # nothing) -- likely a scanned Balance Sheet/P&L, per the real taxpayer file tested
+            # this project (confirmed scanned via this exact same zero-text signature).
             bs_pl_files.append(f)
         else:
             bo_profile_files.append(f)
@@ -288,7 +321,7 @@ def classify_folder(folder="."):
     gstr3b_month_map, w2 = _build_month_file_map(gstr3b_files, _gstr3b_months, "GSTR-3B")
     einv_month_map, w3 = _build_month_file_map(einv_files, _einv_months, "E-Invoice")
     gstr2b_month_map, w4 = _build_month_file_map(gstr2b_files, _gstr2b_months, "GSTR-2B")
-    warnings = w1 + w2 + w3 + w4
+    warnings = w1 + w2 + w3 + w4 + pdf_classify_warnings
 
     return dict(
         # NEW multi-year keys (month-level file resolution -- use these)
@@ -322,6 +355,9 @@ def classify_folder(folder="."):
         # NEW optional annual-return-side documents
         gstr9_files=gstr9_files, gstr9c_files=gstr9c_files,
         table8a_files=table8a_files, bs_pl_files=bs_pl_files,
+        hsn_sac_master_files=hsn_sac_master_files,
+        hsn_sac_master_file=(sorted(hsn_sac_master_files, key=os.path.getmtime)[-1]
+                              if hsn_sac_master_files else None),
         self_gstin=self_gstin, company_name=company_name,
     )
 
@@ -348,3 +384,4 @@ if __name__ == "__main__":
     print("GSTR-9C files:", res["gstr9c_files"])
     print("Table 8A files:", res["table8a_files"])
     print("BS/P&L files:", res["bs_pl_files"])
+    print("HSN/SAC master file (this run's override, if any):", res["hsn_sac_master_file"])

@@ -59,6 +59,7 @@ swap in an official master if/when you have one (see HSN_RATE_MASTER's
 docstring for exactly where to edit).
 """
 
+import os
 import re
 import datetime as _dt
 import statistics as _stats
@@ -94,21 +95,176 @@ MONTH_IDX = {m: i for i, m in enumerate(MONTH_ORDER)}
 # CURATED REFERENCE DATA -- edit here if you get an official master
 # ======================================================================
 
-# HSN prefix -> (expected rate %, description). Longest-prefix match is used,
-# so "3004" also matches "30041010"/"30041020"/"30049099" unless a longer,
-# more specific prefix is added below. Built ONLY for HSN codes actually
-# found in this taxpayer's real 'hsn' sheet (FY2022-23) -- extend as needed.
-HSN_RATE_MASTER = {
-    "3003":   (12.0, "Medicaments (other than 3004), not put up for retail sale"),
-    "3004":   (12.0, "Medicaments put up in measured doses / for retail sale"),
-    "3808":   (18.0, "Insecticides, fungicides, herbicides, disinfectants"),
-    "3915":   (5.0,  "Waste, parings and scrap of plastics"),
-    "4707":   (5.0,  "Recovered (waste and scrap) paper or paperboard"),
-    "7204":   (18.0, "Ferrous waste and scrap"),
-    "7606":   (18.0, "Aluminium plates, sheets, strip"),
-    "8402":   (18.0, "Steam or vapour generating boilers"),
-    "998843": (12.0, "Job-work services -- manufacture of pharmaceutical products"),
+# ======================================================================
+# CURATED REFERENCE DATA -- DATE-VERSIONED
+# ======================================================================
+# GST rates are NOT static -- a single "current" snapshot is actively WRONG
+# for scrutinizing a past financial year. Confirmed concretely: GST 2.0
+# (Notification 9/2025-CT(Rate), effective 22-Sep-2025, superseding
+# Notification 01/2017-CT(Rate)) merged the 12% slab into 18%, added a new
+# 40% peak rate, and moved most medicaments to 5%/Nil. A taxpayer's FY22-23
+# invoices must be checked against the PRE-22-Sep-2025 rate, not whatever is
+# "current" today -- this table stores BOTH, keyed by date range, so the
+# check below always selects the rate that was actually in force on the
+# invoice's own month.
+#
+# Each code maps to a list of (from_date, to_date_or_None, rate_or_None,
+# desc, confidence, source_note) tuples. `to_date=None` means "still the
+# latest period this table knows about" (see HSN_RATE_HISTORY_LAST_REVIEWED)
+# -- NOT "in force forever, guaranteed current". `rate=None` with
+# confidence="unconfirmed" means the period is KNOWN to exist (GST 2.0
+# happened) but the exact new rate for this specific code was NOT
+# confidently verified during research -- the check below treats this as
+# "cannot compare, not guessed", never silently falls back to the prior
+# period's rate.
+#
+# PRE-22-Sep-2025 rows: all "high" confidence, taken from this taxpayer's
+# own real, filed FY22-23 GSTR-1 data (the same curation that was here
+# before this table existed as HSN_RATE_MASTER).
+# POST-22-Sep-2025 rows: researched via web search this session; confidence
+# graded per-code based on how consistent/specific the sources were.
+HSN_RATE_HISTORY = {
+    "3003": [
+        (_dt.date(2017, 7, 1), _dt.date(2025, 9, 21), 12.0,
+         "Medicaments (other than 3004), not put up for retail sale", "high",
+         "Notification 01/2017-CT(Rate) Schedule II -- taxpayer's own FY22-23 filed data."),
+        (_dt.date(2025, 9, 22), None, None,
+         "Medicaments (other than 3004) -- post-GST-2.0 rate is genuinely product-dependent "
+         "(life-saving formulations -> Nil, most others -> 5%, some specialised items -> 18%)",
+         "unconfirmed",
+         "GST 2.0 moved most medicaments to 5%/Nil, but the exact sub-heading classification "
+         "determines which -- NOT auto-applied here; verify the specific product against "
+         "Notification 9/2025-CT(Rate) before treating a rate difference as a finding."),
+    ],
+    "3004": [
+        (_dt.date(2017, 7, 1), _dt.date(2025, 9, 21), 12.0,
+         "Medicaments put up in measured doses / for retail sale", "high",
+         "Notification 01/2017-CT(Rate) Schedule II -- taxpayer's own FY22-23 filed data."),
+        (_dt.date(2025, 9, 22), None, None,
+         "Medicaments -- post-GST-2.0 rate is genuinely product-dependent (life-saving -> Nil, "
+         "most others -> 5%, some specialised items -> 18%)", "unconfirmed",
+         "Same situation as 3003 -- verify the specific product against Notification "
+         "9/2025-CT(Rate) before treating a rate difference as a finding."),
+    ],
+    "3808": [
+        (_dt.date(2017, 7, 1), None, 18.0,
+         "Insecticides, fungicides, herbicides, disinfectants", "high",
+         "Confirmed UNCHANGED across GST 2.0 -- multiple independent sources agree this stayed "
+         "at 18% both before and after 22-Sep-2025."),
+    ],
+    "3915": [
+        (_dt.date(2017, 7, 1), _dt.date(2025, 9, 21), 5.0,
+         "Waste, parings and scrap of plastics", "high",
+         "Taxpayer's own FY22-23 filed data. NOTE -- DISCREPANCY: several generic web sources "
+         "describe plastic scrap (3915) as 18% both before and after GST 2.0, which conflicts "
+         "with this taxpayer's own actually-filed 5%. Kept at the taxpayer-verified figure "
+         "(their real, government-accepted return) rather than overwritten by unverified web "
+         "content, but this conflict is NOT resolved -- if you have the actual product "
+         "description/sub-heading, confirm which is correct."),
+        (_dt.date(2025, 9, 22), None, None,
+         "Waste, parings and scrap of plastics -- post-GST-2.0 rate not confirmed, given the "
+         "unresolved pre-existing discrepancy noted above", "unconfirmed",
+         "Needs manual verification against Notification 9/2025-CT(Rate) before use."),
+    ],
+    "4707": [
+        (_dt.date(2017, 7, 1), _dt.date(2025, 9, 21), 5.0,
+         "Recovered (waste and scrap) paper or paperboard", "high",
+         "Taxpayer's own FY22-23 filed data."),
+        (_dt.date(2025, 9, 22), None, 5.0,
+         "Recovered (waste and scrap) paper or paperboard", "medium",
+         "Multiple sources confirm paper/scrap stayed in the 5% band post-GST-2.0 (some "
+         "describe a reduction from 12%, which doesn't match this taxpayer's own pre-2.0 5% -- "
+         "likely a different sub-heading within 4707; kept at 5% with MEDIUM, not high, "
+         "confidence -- verify before relying on this for a specific finding)."),
+    ],
+    "7204": [
+        (_dt.date(2017, 7, 1), None, 18.0, "Ferrous waste and scrap", "high",
+         "Confirmed UNCHANGED across GST 2.0 -- multiple independent, mutually consistent "
+         "sources (iron/steel scrap explicitly called out as staying in the standard 18% "
+         "slab, not treated as an essential/concessional item)."),
+    ],
+    "7606": [
+        (_dt.date(2017, 7, 1), _dt.date(2025, 9, 21), 18.0,
+         "Aluminium plates, sheets, strip", "high", "Taxpayer's own FY22-23 filed data."),
+        (_dt.date(2025, 9, 22), None, None,
+         "Aluminium plates, sheets, strip -- post-GST-2.0 rate NOT researched (web searches "
+         "this session surfaced HSN 7602 aluminium SCRAP/waste, a different code from this "
+         "taxpayer's 7606 finished-product code -- do not assume they moved together)",
+         "unconfirmed", "Needs manual verification against Notification 9/2025-CT(Rate)."),
+    ],
+    "8402": [
+        (_dt.date(2017, 7, 1), _dt.date(2025, 9, 21), 18.0,
+         "Steam or vapour generating boilers", "high", "Taxpayer's own FY22-23 filed data."),
+        (_dt.date(2025, 9, 22), None, None,
+         "Steam or vapour generating boilers -- post-GST-2.0 rate NOT researched this session",
+         "unconfirmed", "Needs manual verification against Notification 9/2025-CT(Rate)."),
+    ],
+    "998843": [
+        (_dt.date(2017, 7, 1), _dt.date(2025, 9, 21), 12.0,
+         "Job-work services -- manufacture of pharmaceutical products", "high",
+         "Taxpayer's own FY22-23 filed data."),
+        (_dt.date(2025, 9, 22), None, None,
+         "Job-work services -- manufacture of pharmaceutical products -- post-GST-2.0 rate NOT "
+         "researched. The general '12% slab merged into 18%' GST 2.0 mechanic suggests 18%, but "
+         "pharma job-work may carry its own concessional entry -- not confirmed either way.",
+         "unconfirmed", "Needs manual verification against Notification 9/2025-CT(Rate)/SAC schedule."),
+    ],
 }
+
+# The date this table's post-GST-2.0 entries were last researched/reviewed --
+# NOT a guarantee those entries are still current beyond this date. Update
+# this (and re-verify the "unconfirmed" rows) periodically, or whenever a
+# new GST Council rate notification is announced.
+HSN_RATE_HISTORY_LAST_REVIEWED = _dt.date(2026, 7, 12)
+
+# Backward-compatible flat view (pre-22-Sep-2025 rates only) -- some older
+# code/tests may still reference HSN_RATE_MASTER directly by that name.
+HSN_RATE_MASTER = {
+    code: (periods[0][2], periods[0][3]) for code, periods in HSN_RATE_HISTORY.items()
+}
+
+
+def _hsn_rate_for_date(hsn, on_date, table=None):
+    """Longest-prefix match on `hsn` against HSN_RATE_HISTORY, then pick the
+    period whose [from, to] window contains `on_date`. Returns a dict
+    (rate, desc, confidence, source, prefix) or None if no code/period
+    matches at all. IMPORTANT: if the matched period's rate is None
+    (confidence='unconfirmed'), this STILL returns that dict -- callers
+    must check `confidence`/`rate is None` themselves and skip comparison
+    rather than silently falling back to an earlier period's rate."""
+    table = table if table is not None else HSN_RATE_HISTORY
+    hsn = (hsn or "").strip()
+    best_prefix = None
+    for prefix in table:
+        if hsn.startswith(prefix) and (best_prefix is None or len(prefix) > len(best_prefix)):
+            best_prefix = prefix
+    if best_prefix is None:
+        return None
+    for from_d, to_d, rate, desc, confidence, source in table[best_prefix]:
+        if from_d <= on_date and (to_d is None or on_date <= to_d):
+            return dict(rate=rate, desc=desc, confidence=confidence, source=source,
+                        prefix=best_prefix, period_from=from_d, period_to=to_d)
+    return None
+
+
+def _month_label_to_date(label):
+    """'Apr-22' -> date(2022,4,1). Uses the FIRST of the month -- the GSTR-1
+    HSN summary sheet is a MONTHLY aggregate (no per-invoice date available
+    at this level), so a month straddling a rate-change boundary (only
+    Sep-25, given GST 2.0's 22-Sep-2025 effective date) is an inherent
+    blind spot: this resolves to the 1st, i.e. the PRE-change rate, for
+    that specific month, and the check below flags Sep-25 rows with an
+    explicit note rather than silently picking a side."""
+    m = re.match(r"^([A-Za-z]{3})-(\d{2})$", label or "")
+    if not m:
+        return None
+    mon, yy = m.group(1), m.group(2)
+    inv = {v: k for k, v in mpu.CAL_MONTH_ABBR.items()}
+    mm = inv.get(mon.title())
+    if not mm:
+        return None
+    return _dt.date(2000 + int(yy), mm, 1)
+
 
 # Rates that are legitimate WITHOUT being "wrong" for any HSN -- the 0.05%/0.1%
 # concessional combined rate under Notification 40/2017-CT(R) & 41/2017-IT(R)
@@ -195,6 +351,240 @@ def _hsn_prefix_lookup(hsn, table):
         if hsn.startswith(prefix) and (best is None or len(prefix) > len(best)):
             best = prefix
     return best
+
+
+# ======================================================================
+# SUPPLEMENTARY (NOT authoritative) HSN rate reference -- mcp-india-stack
+# ======================================================================
+# HSN_RATE_MASTER above is the tool's PRIMARY, human-curated, taxpayer-
+# verified rate table -- built only for HSN codes actually seen in a given
+# taxpayer's real data. For a NEW taxpayer/industry with codes not yet in
+# that curated list, this section provides a SECOND, WIDER-COVERAGE source
+# so the tool isn't silently blind to unlisted codes -- but at a distinctly
+# LOWER trust level, matching what its own upstream data says about itself.
+#
+# Source: the `mcp-india-stack` PyPI package's bundled `hsn_master.csv`
+# (~22,500 rows, 2/4/8-digit CBIC hierarchy). Verified this round by reading
+# the real package's real `tools/hsn.py` source and a real installed CSV
+# (see chat history) -- NOT guessed from the package's own marketing
+# examples, which turned out not to match the real API surface.
+#
+# Why this stays REVIEW, never FLAG, and is read from the RAW CSV rather
+# than the package's own lookup_hsn_code() API:
+#   1. The package's own DISCLAIMER text (baked into every one of its real
+#      API responses): "GST rates may vary based on specific conditions.
+#      Verify with a tax professional for commercial transactions."
+#   2. No notification/effective-date column in the CSV -- staleness after
+#      a rate revision (e.g. the 2025 GST-rate-rationalisation round) can't
+#      be detected from the file itself.
+#   3. It's a single-maintainer community dataset, not a CBIC-audited feed.
+#   4. lookup_hsn_code() ships with a background auto-update from a CDN --
+#      reading its live API would make this tool's findings NON-reproducible
+#      run-to-run. Reading the CSV directly, once, from whatever version is
+#      pip-installed, avoids that -- output is reproducible for a given
+#      installed package version, which is the best available compromise.
+#   5. lookup_hsn_code() itself does `rows[0]` on a duplicate-code match
+#      with no disambiguation -- this reader is STRICTER: a code with
+#      multiple CSV rows that DISAGREE on rate is dropped from the table
+#      entirely (never guesses which row is right), and a row whose
+#      CGST_Rate+SGST_Rate doesn't equal its own IGST_Rate (an internal
+#      data-consistency problem) is also dropped rather than trusted.
+#
+# Importing the top-level `mcp_india_stack` package only touches its
+# lightweight __init__.py (confirmed: dir(mcp_india_stack) shows only
+# dunder attributes) -- it does NOT pull in fastmcp/starlette/uvicorn/etc,
+# which only load if you import mcp_india_stack.server or .tools.*. This
+# reader deliberately never imports those -- it locates the CSV via the
+# package's own __file__ and reads it with the stdlib csv module only.
+_MCP_INDIA_STACK_HSN_TABLE = None   # lazy singleton, built once per process
+
+
+# ======================================================================
+# HSN/SAC CODE-AND-DESCRIPTION MASTER (user-supplied, or bundled default)
+# ======================================================================
+# Distinct from HSN_RATE_HISTORY above and from mcp-india-stack's table:
+# this master has CODE + DESCRIPTION columns ONLY -- no GST rate column at
+# all (confirmed on the real file: sheets 'HSN_MSTR'/'SAC_MSTR', columns
+# HSN_CD/HSN_Description and SAC_CD/SAC_Description). It cannot be used for
+# rate comparison. What it DOES enable: confirming a reported HSN/SAC code
+# actually EXISTS as a real classification, and showing the code's official
+# description alongside the taxpayer's own description for a quick human
+# eyeball-check -- neither of these existed in this tool before.
+#
+# Source-of-truth behaviour (per explicit instruction): if the CURRENT run's
+# folder contains a file with this exact sheet signature, that file is used
+# for THIS run (a fresh, one-off reference). If not, the tool falls back to
+# `HSN_SAC_default.xlsx`, bundled alongside these .py files -- this is the
+# "hardcoded" default, built from whatever HSN_SAC.xlsx was most recently
+# supplied and explicitly asked to become the new baseline. To make a new
+# upload the new permanent default, replace HSN_SAC_default.xlsx with it
+# (Claude does this in a future session on request -- there is no
+# background process that does this automatically; see chat history).
+_HSN_SAC_MASTER_CACHE = {}   # keyed by resolved path, so a run-supplied file
+                             # never contaminates the bundled-default cache
+
+
+def _load_hsn_sac_master(override_path=None):
+    """Returns dict(hsn={code: description}, sac={code: description},
+    available=True/False, source=path_used, reason=...). Never raises --
+    an unreadable or entirely absent master degrades to available=False,
+    and the validity check below skips cleanly (same pattern as every
+    other optional source in this tool)."""
+    default_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "HSN_SAC_default.xlsx")
+    path = override_path if (override_path and os.path.exists(override_path)) else default_path
+    if path in _HSN_SAC_MASTER_CACHE:
+        return _HSN_SAC_MASTER_CACHE[path]
+    out = dict(hsn={}, sac={}, available=False, source=path, reason=None)
+    if not os.path.exists(path):
+        out["reason"] = f"Neither a run-supplied HSN/SAC master nor the bundled default was found at {path!r}."
+        _HSN_SAC_MASTER_CACHE[path] = out
+        return out
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        if "HSN_MSTR" in wb.sheetnames:
+            ws = wb["HSN_MSTR"]
+            for r in ws.iter_rows(min_row=2, values_only=True):
+                if not r or not r[0]:
+                    continue
+                out["hsn"][str(r[0]).strip()] = str(r[1] or "").strip()
+        if "SAC_MSTR" in wb.sheetnames:
+            ws = wb["SAC_MSTR"]
+            for r in ws.iter_rows(min_row=2, values_only=True):
+                if not r or r[0] is None:
+                    continue
+                out["sac"][str(r[0]).strip()] = str(r[1] or "").strip()
+        wb.close()
+        out["available"] = bool(out["hsn"] or out["sac"])
+        print(f"[info] HSN/SAC master loaded from {path!r}: {len(out['hsn'])} HSN code(s), "
+              f"{len(out['sac'])} SAC code(s).")
+    except Exception as ex:
+        out["reason"] = f"Could not read {path!r}: {ex}"
+        out["available"] = False
+    _HSN_SAC_MASTER_CACHE[path] = out
+    return out
+
+
+def check_hsn_master_validity(hsn_by_month, override_path=None):
+    """A7: does each reported HSN code actually exist in the official
+    code-and-description master? A code not found is REVIEW (not FLAG --
+    the master is a point-in-time snapshot; a genuinely new WCO/CBIC code
+    added after the snapshot was taken would be a false alarm at FLAG
+    severity, and this tool has no 'as-of date' for this particular file
+    the way it does for HSN_RATE_HISTORY's rate periods). Also surfaces the
+    official description next to the taxpayer's own, for a quick human
+    eyeball-check -- no automated fuzzy-text-matching judgment is made,
+    since that risks exactly the kind of noisy false-positive this tool's
+    whole design avoids."""
+    master = _load_hsn_sac_master(override_path)
+    if not master["available"]:
+        return [Finding("A7", "HSN/SAC code-validity check (master list)", INFO,
+                         master["reason"] or "HSN/SAC master not available this run.")]
+    F = []
+    checked = flagged = 0
+    for m in sorted(hsn_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+        for row in hsn_by_month[m]:
+            hsn, desc = row["hsn"], row["desc"]
+            if not hsn or hsn.isalpha():
+                continue
+            checked += 1
+            official_desc = master["hsn"].get(hsn)
+            if official_desc is None:
+                # try the SAC master too (service codes can appear on the same 'hsn' sheet)
+                official_desc = master["sac"].get(hsn)
+            if official_desc is None:
+                flagged += 1
+                F.append(Finding("A7", "HSN/SAC code not found in official master", REVW,
+                    f"{m}: HSN/SAC '{hsn}' (taxpayer's own description: {desc[:80]!r}) does not "
+                    f"appear in the code-and-description master ({os.path.basename(master['source'])}). "
+                    f"Could be a genuinely invalid/mistyped code, OR a real code added to the "
+                    f"official list after this master's snapshot was taken -- verify on the GST "
+                    f"portal's own HSN/SAC search before treating as an error. "
+                    f"Taxable Rs.{row['taxable']:,.2f}.",
+                    numbers=dict(month=m, hsn=hsn, taxable=row["taxable"])))
+    source_note = os.path.basename(master["source"])
+    if checked and not flagged:
+        F.append(Finding("A7", "HSN/SAC code-validity check (master list)", PASS,
+                          f"{checked} HSN/SAC code line(s) checked against {source_note} -- every "
+                          f"code exists in the official master."))
+    elif not checked:
+        F.append(Finding("A7", "HSN/SAC code-validity check (master list)", INFO,
+                          "No HSN summary rows supplied this run -- nothing to check."))
+    return F
+
+
+def _load_mcp_india_stack_hsn_table():
+    global _MCP_INDIA_STACK_HSN_TABLE
+    if _MCP_INDIA_STACK_HSN_TABLE is not None:
+        return _MCP_INDIA_STACK_HSN_TABLE
+    table = {}
+    try:
+        import mcp_india_stack
+        import csv as _csv
+        csv_path = os.path.join(os.path.dirname(mcp_india_stack.__file__), "data", "hsn", "hsn_master.csv")
+        if not os.path.exists(csv_path):
+            print("[info] mcp-india-stack installed but hsn_master.csv not found at the expected "
+                  f"path ({csv_path}) -- extended HSN-rate reference not available.")
+            _MCP_INDIA_STACK_HSN_TABLE = {}
+            return {}
+        by_code = {}
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            for row in _csv.DictReader(f):
+                code = (row.get("HSNCode") or "").strip()
+                if not code:
+                    continue
+                try:
+                    cgst = float(row.get("CGST_Rate") or 0)
+                    sgst = float(row.get("SGST_Rate") or 0)
+                    igst = float(row.get("IGST_Rate") or 0)
+                except ValueError:
+                    continue
+                by_code.setdefault(code, []).append(
+                    dict(igst=igst, cgst=cgst, sgst=sgst, desc=(row.get("Description") or "").strip()))
+        dropped_ambiguous = dropped_inconsistent = dropped_allzero = 0
+        for code, rows in by_code.items():
+            # drop if internally inconsistent (CGST+SGST should equal IGST) -- never trust a
+            # row the source data itself doesn't agree with.
+            consistent_rows = [r for r in rows if abs((r["cgst"] + r["sgst"]) - r["igst"]) < 0.01]
+            if len(consistent_rows) < len(rows):
+                dropped_inconsistent += (len(rows) - len(consistent_rows))
+            if not consistent_rows:
+                continue
+            # drop if duplicate rows for the same code DISAGREE on rate -- never guess which
+            # one applies (this is stricter than mcp-india-stack's own lookup_hsn_code(), which
+            # silently takes rows[0]).
+            distinct_rates = {round(r["igst"], 2) for r in consistent_rows}
+            if len(distinct_rates) > 1:
+                dropped_ambiguous += 1
+                continue
+            rate = consistent_rows[0]["igst"]
+            # DROP a lone all-zero rate -- CONFIRMED on a real refreshed export (this session):
+            # 22,471 of 22,500 rows (99.9%) in this dataset carry CGST=SGST=IGST=CESS=0.0, and
+            # cross-checking against 8 of this taxpayer's own real, non-nil-rated curated codes
+            # (3003/3808/3915/4707/7204/7606/8402/998843, all genuinely taxed at 5-18% per their
+            # actual filed GSTR-1) showed EVERY one of them sitting at this same all-zero pattern
+            # in the dataset. This means an all-zero row here overwhelmingly signals "no rate was
+            # ever populated for this entry" (a bare HSN/SAC nomenclature/classification stub),
+            # NOT "this good/service is genuinely nil-rated" -- trusting it would manufacture a
+            # false REVIEW against a correctly-taxed real invoice on almost every code. A
+            # genuinely nil-rated good therefore currently shows as "not covered" rather than
+            # confirmed-nil -- an intentional false-negative (silence) instead of a false-positive
+            # (wrong flag), consistent with this tool's severity philosophy throughout.
+            if abs(rate) < 0.01:
+                dropped_allzero += 1
+                continue
+            table[code] = (rate, consistent_rows[0]["desc"])
+        print(f"[info] mcp-india-stack HSN reference loaded: {len(table)} usable code(s) "
+              f"({dropped_ambiguous} code(s) dropped for disagreeing duplicate rates, "
+              f"{dropped_inconsistent} row(s) dropped for CGST+SGST != IGST, "
+              f"{dropped_allzero} code(s) dropped for an all-zero rate -- see loader comment).")
+    except ImportError:
+        table = {}
+    except Exception as ex:
+        print(f"[warn] mcp-india-stack HSN reference could not be loaded ({ex}) -- "
+              "extended HSN-rate check skipped, not guessed.")
+        table = {}
+    _MCP_INDIA_STACK_HSN_TABLE = table
+    return table
 
 
 # ======================================================================
@@ -366,21 +756,35 @@ def check_hsn_rate_master(hsn_by_month):
                     f"{m}: HSN '{hsn}' ({row['desc'][:50]}) reported at {len(hsn)} digits. "
                     f"Turnover >Rs.5cr requires 6-digit HSN. Taxable value at this code: "
                     f"Rs.{row['taxable']:,.2f}.", numbers=dict(month=m, hsn=hsn, taxable=row["taxable"])))
-            prefix = _hsn_prefix_lookup(hsn, HSN_RATE_MASTER)
-            if prefix:
-                expected, desc = HSN_RATE_MASTER[prefix]
-                if abs(rate - expected) > 0.01:
+            on_date = _month_label_to_date(m)
+            match = _hsn_rate_for_date(hsn, on_date) if on_date else None
+            if match:
+                expected, desc, confidence, source = match["rate"], match["desc"], match["confidence"], match["source"]
+                if expected is None:
+                    # Known rate-change period, but this code's new rate wasn't confidently
+                    # researched -- do NOT compare, do NOT silently fall back to the prior
+                    # period's rate. Surface once per code+month as INFO, not a guessed FLAG.
+                    F.append(Finding("A1", "HSN rate reference unconfirmed for this period", INFO,
+                        f"{m}: HSN {hsn} billed at {rate}% -- this month falls in a period "
+                        f"(from {match['period_from']}) whose reference rate for "
+                        f"this HSN was NOT confidently researched ({desc}). {source} No comparison "
+                        f"made -- verify manually against the notification in force on the invoice date.",
+                        numbers=dict(month=m, hsn=hsn, rate=rate)))
+                elif abs(rate - expected) > 0.01:
+                    conf_note = ("" if confidence == "high" else
+                                 f" [{confidence.upper()} CONFIDENCE reference -- {source}]")
                     if rate in MERCHANT_EXPORT_RATES:
                         F.append(Finding("A1", "Concessional rate on HSN (verify merchant-export)", INFO,
-                            f"{m}: HSN {hsn} ({desc}) billed at {rate}% vs standard {expected}%. "
+                            f"{m}: HSN {hsn} ({desc}) billed at {rate}% vs standard {expected}%.{conf_note} "
                             f"Matches the merchant-export concessional rate (Notif 40/41-2017) -- "
                             f"verify Form CT-1/ARE-3 or LUT-linked merchant-export documentation, "
                             f"this is not automatically a misclassification. Taxable Rs.{row['taxable']:,.2f}.",
                             numbers=dict(month=m, hsn=hsn, rate=rate, expected=expected)))
                     else:
-                        F.append(Finding("A1", "Wrong GST rate charged vs standard HSN rate", FLAG,
-                            f"{m}: HSN {hsn} ({desc}) billed at {rate}% -- standard rate is {expected}%. "
-                            f"Taxable Rs.{row['taxable']:,.2f}, tax at this line "
+                        sev = FLAG if confidence == "high" else REVW
+                        F.append(Finding("A1", "Wrong GST rate charged vs standard HSN rate", sev,
+                            f"{m}: HSN {hsn} ({desc}) billed at {rate}% -- reference rate is "
+                            f"{expected}%.{conf_note} Taxable Rs.{row['taxable']:,.2f}, tax at this line "
                             f"Rs.{row['igst']+row['cgst']+row['sgst']:,.2f}. Verify against the rate "
                             f"notification in force on the invoice date before treating as confirmed.",
                             numbers=dict(month=m, hsn=hsn, rate=rate, expected=expected, taxable=row["taxable"])))
@@ -406,6 +810,77 @@ def check_hsn_rate_master(hsn_by_month):
         F.append(Finding("A3", "Compensation Cess missing on cess-applicable HSN", INFO,
             "No HSN code found matches the curated Cess-applicable list (tobacco/coal/luxury etc. -- "
             "none of this taxpayer's codes fall in those categories). Extend CESS_HSN_PREFIXES if needed."))
+    return F
+
+
+def check_hsn_rate_master_extended(hsn_by_month):
+    """A1-EXT: same wrong-rate idea as check_hsn_rate_master's A1, but ONLY
+    for HSN codes NOT already covered by the curated, taxpayer-verified
+    HSN_RATE_MASTER above -- widens coverage for a new taxpayer/industry
+    whose codes aren't in that hand-curated list yet. ALWAYS REVIEW, never
+    FLAG (see the long comment above _load_mcp_india_stack_hsn_table for
+    why) -- this is a lead to verify, not a finding to act on directly."""
+    F = []
+    table = _load_mcp_india_stack_hsn_table()
+    if not table:
+        return [Finding("A1-EXT", "Extended HSN-rate reference (mcp-india-stack)", INFO,
+                         "mcp-india-stack not installed, or its bundled hsn_master.csv could not be "
+                         "read -- extended coverage beyond the curated HSN_RATE_MASTER is not "
+                         "available this run. Install with 'pip install mcp-india-stack "
+                         "--break-system-packages' to enable (optional; the curated master's own "
+                         "codes are unaffected either way).")]
+    GST_2_0_EFFECTIVE = _dt.date(2025, 9, 22)
+    checked = 0
+    for m in sorted(hsn_by_month, key=lambda x: MONTH_IDX.get(x, 99)):
+        on_date = _month_label_to_date(m)
+        for row in hsn_by_month[m]:
+            hsn, rate = row["hsn"], row["rate"]
+            curated = _hsn_rate_for_date(hsn, on_date) if on_date else None
+            if curated and curated["rate"] is not None:
+                continue   # curated master has a CONFIRMED rate for this specific period -- skip here
+            # mcp-india-stack's data carries no date/notification info of its own (see loader
+            # docstring) -- given the package is actively maintained in 2026, it most likely
+            # reflects POST-GST-2.0 rates. Applying it against a PRE-2.0 invoice would recreate
+            # exactly the systematic-false-REVIEW risk already flagged -- so it is only used for
+            # months on/after GST 2.0's effective date. Pre-2.0 months with no curated coverage
+            # simply get no extended check (better than a likely-wrong one).
+            if on_date and on_date < GST_2_0_EFFECTIVE:
+                continue
+            prefix = _hsn_prefix_lookup(hsn, table)
+            if not prefix:
+                continue
+            checked += 1
+            expected, desc = table[prefix]
+            if abs(rate - expected) > 0.01 and rate not in MERCHANT_EXPORT_RATES:
+                match_type = "exact code match" if prefix == hsn else f"rolled up from {hsn!r} to {prefix!r} (shorter/parent code)"
+                F.append(Finding("A1-EXT", "Rate differs from mcp-india-stack reference (verify before acting)",
+                    REVW,
+                    f"{m}: HSN {hsn} ({desc[:60]}) billed at {rate}% vs mcp-india-stack's reference "
+                    f"{expected}% ({match_type}). SOURCE CAVEAT: mcp-india-stack is a third-party, "
+                    f"community-maintained dataset, not a CBIC-audited feed, carries no date/"
+                    f"notification info of its own, and its own disclaimer states rates 'may vary "
+                    f"based on specific conditions' -- this is a lead to check against the actual "
+                    f"rate notification in force on the invoice date (or add this HSN to "
+                    f"HSN_RATE_HISTORY once confirmed), NOT a confirmed misclassification. "
+                    f"Taxable Rs.{row['taxable']:,.2f}.",
+                    numbers=dict(month=m, hsn=hsn, rate=rate, expected=expected)))
+    total_rows = sum(len(rows) for rows in hsn_by_month.values())
+    if checked and not any(f.ref == "A1-EXT" and f.severity == REVW for f in F):
+        F.append(Finding("A1-EXT", "Extended HSN-rate reference (mcp-india-stack)", PASS,
+                          f"{checked} HSN code line(s) not in the curated master were checked against "
+                          "mcp-india-stack's reference rates -- no discrepancy found."))
+    elif checked == 0 and total_rows == 0:
+        F.append(Finding("A1-EXT", "Extended HSN-rate reference (mcp-india-stack)", INFO,
+                          "No HSN summary rows supplied this run (GSTR-1 'hsn' sheet empty or absent) "
+                          "-- nothing to check."))
+    elif checked == 0:
+        F.append(Finding("A1-EXT", "Extended HSN-rate reference (mcp-india-stack)", INFO,
+                          "Every HSN code line this run was either already covered by the curated "
+                          "HSN_RATE_HISTORY with a confirmed rate for its period, or fell in a "
+                          "pre-GST-2.0 (before 22-Sep-2025) month where mcp-india-stack's undated "
+                          "'latest' reference is deliberately NOT applied (it likely reflects "
+                          "current/post-2.0 rates, and using it against an older invoice would "
+                          "recreate the systematic-mismatch risk this gating exists to prevent)."))
     return F
 
 
@@ -1438,10 +1913,13 @@ def not_feasible_notes():
 # TOP-LEVEL ORCHESTRATION
 # ======================================================================
 def run_all(files, ewb_out_rows, ewb_in_rows, months_covered, annual_data,
-            monthly_comparison_rows, self_gstin):
+            monthly_comparison_rows, self_gstin, hsn_sac_master_override=None):
     """files: {'gstr1':path, 'gstr3b':path, 'einv':path or None, 'gstr2b':path or None}
     annual_data: the same dict master_build.py already builds (cash/credit/liab/bo/...)
     monthly_comparison_rows: annualwb.build_monthly_rows(annual_data) output
+    hsn_sac_master_override: path to a run-supplied HSN/SAC code-and-description
+    master (folder_classifier.py's 'hsn_sac_master_file'), or None to use the
+    bundled HSN_SAC_default.xlsx.
     Returns a flat list of Finding, across every check in this module.
     Individual check functions are deliberately isolated with try/except so
     one check's failure doesn't blank out the other ~30 (see module docstring
@@ -1461,6 +1939,8 @@ def run_all(files, ewb_out_rows, ewb_in_rows, months_covered, annual_data,
 
     checks = [
         ("A1/A2/A3/A6", lambda: check_hsn_rate_master(hsn_by_month)),
+        ("A1-EXT", lambda: check_hsn_rate_master_extended(hsn_by_month)),
+        ("A7", lambda: check_hsn_master_validity(hsn_by_month, hsn_sac_master_override)),
         ("A4", lambda: check_hsn_multi_rate(hsn_by_month)),
         ("A5", check_blocked_itc_by_hsn),
         ("B1/B3", lambda: check_pos_tax_head(g1_lines_by_month, self_gstin)),

@@ -22,7 +22,17 @@ the real Balance Sheet/P&L).
 # (NOT OCR -- see OCR_LIMITATION.md) directly from the document text visible
 # in this session. Cross-checked: Total Assets = Total Equity+Liab for BOTH
 # years (R0 passes), matching the document's own totals row exactly.
-MRHC_BS_PL = {
+#
+# GENERIC NAME (BS_PL_DATA, not a taxpayer-specific name): master_build.py
+# tries to import this exact variable from this exact file -- for a NEW
+# taxpayer, replace the values below with their real figures (rename
+# nothing, keep the variable name BS_PL_DATA so the pipeline picks it up
+# automatically), or empty the dict entirely to skip R0-R12 cleanly.
+BS_PL_DATA = {
+    # SAFETY TAG (checked by master_build.py before use): this dict is only applied if it
+    # matches the GSTIN actually being processed this run. Prevents a stale/wrong-taxpayer's
+    # BS/PL figures from silently being used against a different taxpayer's GST returns.
+    "_gstin": "05AAECM6380J1ZA",
     "total_assets": {"fy_prior": 22_88_22_678.61, "fy_current": 30_39_29_544.01},
     "total_equity_liab": {"fy_prior": 22_88_22_678.61, "fy_current": 30_39_29_544.01},
 
@@ -51,7 +61,7 @@ if __name__ == "__main__":
     import annual_return_parser as arp
 
     gstr9c = arp.parse_gstr9c("/mnt/user-data/uploads/1783794742279_GSTR-9C_05AAECM6380J1ZA_032023.pdf")
-    findings = fchk.check_bs_pl_rules(MRHC_BS_PL, gstr9c=gstr9c, bo_profile=None)
+    findings = fchk.check_bs_pl_rules(BS_PL_DATA, gstr9c=gstr9c, bo_profile=None)
     for f in findings:
         print(f"[{f.severity:8}] {f.ref:6} {f.title}")
         print(f"           {f.detail[:200]}")

@@ -567,6 +567,74 @@ def write_cancelled_einvoices(ws, all_cancelled, cross_check_findings, col_found
 
 
 
+def write_hsn_review_table(ws, hsn_rows, month_label):
+    """Appends a 'HSN RATE REVIEW' section into the CURRENT worksheet
+    (the same sheet write_comparison() just wrote into), below whatever
+    write_comparison() left there. One row per HSN code actually used this
+    month (taxable value, rate charged, tax amount -- exactly as reported
+    in GSTR-1's own HSN summary table, i.e. already the per-HSN aggregate,
+    no further summing needed), plus two reference-rate columns and an
+    explicit 'verify' flag on every row -- per the person's own request:
+    show the raw HSN-wise breakdown side by side with whatever reference
+    data exists, and flag every one for manual verification rather than
+    silently trusting either reference (matches this tool's own severity
+    discipline throughout -- see HSN_RATE_HISTORY's and
+    _load_mcp_india_stack_hsn_table's own docstrings for exactly why
+    neither reference is treated as ground truth on its own)."""
+    on_date = hfc._month_label_to_date(month_label)
+    mcp_table = hfc._load_mcp_india_stack_hsn_table()
+
+    r = ws.max_row + 3
+    ws.cell(r, 1, f"HSN RATE REVIEW -- TAXABLE SUPPLY BY HSN CODE ({month_label})").font = TITLEF
+    r += 1
+    ws.cell(r, 1, "Every HSN code used this month, with the rate/taxable/tax as actually reported "
+                  "in GSTR-1's HSN summary, alongside two independent reference rates where "
+                  "available. EVERY row is flagged VERIFY -- neither reference column is ground "
+                  "truth on its own (see HSN & Fraud Pattern Checks sheet, checks A1/A1-EXT/A7, "
+                  "for the full-strength automated comparison); this table is a fast side-by-side "
+                  "worksheet for manual review, not a verdict.").font = Font(size=9, italic=True)
+    r += 2
+    hdr = ["HSN Code", "Description (taxpayer's own)", "Rate Charged (%)", "Taxable Value (Rs)",
+           "Tax Amount (Rs)", "Curated Reference Rate (%)", "mcp-india-stack Reference Rate (%)", "Status"]
+    for i, h in enumerate(hdr, 1):
+        ws.cell(r, i, h)
+    _style_header(ws, r, len(hdr))
+    r += 1
+
+    if not hsn_rows:
+        ws.cell(r, 1, "No HSN summary rows for this month.").font = Font(italic=True)
+        return
+
+    for row in sorted(hsn_rows, key=lambda x: x["hsn"]):
+        hsn, desc, rate = row["hsn"], row["desc"], row["rate"]
+        tax_amt = row["igst"] + row["cgst"] + row["sgst"]
+
+        curated = hfc._hsn_rate_for_date(hsn, on_date) if on_date else None
+        curated_rate = curated["rate"] if curated else None
+        curated_display = (curated_rate if curated_rate is not None else
+                            ("unconfirmed for this period" if curated else "not in curated list"))
+
+        mcp_prefix = hfc._hsn_prefix_lookup(hsn, mcp_table) if mcp_table else None
+        mcp_rate = mcp_table[mcp_prefix][0] if mcp_prefix else None
+        mcp_display = mcp_rate if mcp_rate is not None else "not found"
+
+        mismatch = ((curated_rate is not None and abs(rate - curated_rate) > 0.01) or
+                    (mcp_rate is not None and abs(rate - mcp_rate) > 0.01))
+        status = "VERIFY -- reference rate differs" if mismatch else "VERIFY"
+
+        vals = [hsn, desc, rate, row["taxable"], tax_amt, curated_display, mcp_display, status]
+        for ci, v in enumerate(vals, 1):
+            cell = ws.cell(r, ci, v)
+            cell.border = BORDER
+            cell.font = Font(size=10)
+            if ci in (4, 5) and isinstance(v, float):
+                cell.number_format = "#,##0.00"
+            if ci == 8:
+                cell.fill = RED if mismatch else AMBER
+                cell.alignment = Alignment(horizontal="center")
+        r += 1
+
+
 def main(folder="."):
     print("Classifying folder (merged files)...")
     res = classify_folder(folder)
@@ -703,7 +771,8 @@ def main(folder="."):
     files_for_hsn = dict(gstr1=res["gstr1_merged"], gstr3b=res["gstr3b_merged"],
                           einv=res["einv_merged"], gstr2b=res["gstr2b_merged"])
     hsn_findings = hfc.run_all(files_for_hsn, ewb_out_rows, ewb_in_rows, months_covered, annual_data,
-                                annual_rows, res["self_gstin"])
+                                annual_rows, res["self_gstin"],
+                                hsn_sac_master_override=res.get("hsn_sac_master_file"))
 
     # ---- NEW: annual-return-side sources (GSTR-9, GSTR-9C, Table 8A) + forensic checks ----
     print("Parsing GSTR-9 / GSTR-9C / Table 8A (optional; graceful if absent)...")
@@ -744,6 +813,42 @@ def main(folder="."):
     r14 = fchk.check_four_way_itc(gstr9, gstr2b_fy_total, table8a, gstr9c, annual_turnover=annual_turnover)
     forensic_findings = [r13, r14]
 
+    # ---- NEW: BS/P&L rule engine (R0-R12) -- FIX: this was built and tested standalone
+    # (bs_pl_input.py's own __main__ block) but never actually wired into master_build.py's
+    # pipeline, so it never appeared in the output workbook even when filled in. Tries to
+    # import BS_PL_DATA from bs_pl_input.py in the SAME folder as the running script (not the
+    # data folder -- this is a hand-typed structured input, not a content-detected file, per
+    # OCR_LIMITATION.md); degrades to a single INFO finding if that file/variable is absent or
+    # empty, exactly like every other optional source in this tool. ----
+    try:
+        import bs_pl_input as bspl_mod
+        bs_pl_data = getattr(bspl_mod, "BS_PL_DATA", {})
+    except ImportError:
+        bs_pl_data = {}
+    # SAFETY CHECK (new): refuse to use bs_pl_input.py's data if it's tagged for a DIFFERENT
+    # GSTIN than the one actually being processed this run -- guards against a taxpayer's old
+    # BS/PL figures silently being reused for a different taxpayer's tool run. A dict with no
+    # '_gstin' tag at all is also refused (forces explicit tagging rather than an implicit
+    # "assume it matches").
+    if bs_pl_data:
+        tagged_gstin = bs_pl_data.get("_gstin")
+        if tagged_gstin != res["self_gstin"]:
+            print(f"[warn] bs_pl_input.py's BS_PL_DATA is tagged for GSTIN {tagged_gstin!r}, "
+                  f"but this run is processing {res['self_gstin']!r} -- REFUSING to use it "
+                  "(prevents a stale/wrong-taxpayer's Balance Sheet figures being silently "
+                  "applied). Update bs_pl_input.py's '_gstin' tag and figures for this taxpayer.")
+            bs_pl_data = {}
+    if bs_pl_data:
+        print("Running BS/P&L rule engine (R0-R12) against bs_pl_input.BS_PL_DATA...")
+        bo_for_bspl = annual_data.get("bo") if annual_data.get("bo", {}).get("drc_payments") else None
+        forensic_findings += fchk.check_bs_pl_rules(bs_pl_data, gstr9c=gstr9c, bo_profile=bo_for_bspl)
+    else:
+        forensic_findings.append(fchk.Finding(
+            "R0-R12", "Balance Sheet / P&L rule engine", "INFO",
+            "bs_pl_input.py not found next to master_build.py, or its BS_PL_DATA dict is empty -- "
+            "R0-R12 not run. Fill in bs_pl_input.py (see OCR_LIMITATION.md for why this is a "
+            "hand-typed template, not auto-OCR'd) to enable.", {}))
+
     print("Running cancelled-e-invoice cross-checks...")
     cancelled_by_month = {}
     for m, res_m in zip([r["month"] for r in month_results], month_results):
@@ -777,10 +882,21 @@ def main(folder="."):
             r += 1
             ws_dash.cell(r, 1, f"  {m}: {err}")
 
+    _hsn_rows_cache = {}   # keyed by resolved GSTR-1 file path -- avoids re-parsing the same
+                           # merged file once per month when several months share one file
     for res_m in month_results:
         m = res_m["month"]
         raw.PERIOD_LABEL = m
-        uni.write_comparison(wb.create_sheet(sheet_name("Comparison", m)), res_m["comparisons"], only_mismatch=False)
+        ws_comp = wb.create_sheet(sheet_name("Comparison", m))
+        uni.write_comparison(ws_comp, res_m["comparisons"], only_mismatch=False)
+        g1_path_this_month = res["gstr1_month_map"].get(m)
+        if g1_path_this_month:
+            if g1_path_this_month not in _hsn_rows_cache:
+                _hsn_rows_cache[g1_path_this_month] = hfc._hsn_rows_by_month(g1_path_this_month)
+            hsn_rows_this_month = _hsn_rows_cache[g1_path_this_month].get(m, [])
+        else:
+            hsn_rows_this_month = []
+        write_hsn_review_table(ws_comp, hsn_rows_this_month, m)
         uni.write_analysis14(wb.create_sheet(sheet_name("Analysis14", m)), res_m["findings14"])
         uni.write_eway(wb.create_sheet(sheet_name("EWB", m)), wb.create_sheet(sheet_name("EWB Detail", m)),
                         res_m["findings27"])
